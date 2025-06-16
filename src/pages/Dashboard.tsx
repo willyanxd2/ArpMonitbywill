@@ -6,7 +6,6 @@ import {
   CheckCircle,
   Clock,
   Network,
-  Zap,
   TrendingUp
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
@@ -41,13 +40,6 @@ function Dashboard() {
       icon: Shield,
       color: 'neon-orange',
       trend: `${warningNotifications} warnings`
-    },
-    {
-      label: 'Network Health',
-      value: '98.5%',
-      icon: TrendingUp,
-      color: 'neon-purple',
-      trend: 'All systems operational'
     }
   ];
 
@@ -83,7 +75,7 @@ function Dashboard() {
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {stats.map((stat, index) => {
           const Icon = stat.icon;
           return (
@@ -189,7 +181,7 @@ function Dashboard() {
                       <div>
                         <p className="font-medium text-white">{job.name}</p>
                         <p className="text-sm text-dark-400">
-                          {job.interface} • {job.subnet}
+                          {job.network_interface} • {job.subnet}
                         </p>
                       </div>
                     </div>
@@ -209,28 +201,6 @@ function Dashboard() {
               </div>
             )}
           </div>
-        </div>
-      </div>
-
-      {/* Quick Actions */}
-      <div className="bg-dark-900 rounded-xl p-6 border border-dark-700">
-        <h3 className="text-lg font-semibold text-white mb-4">Quick Actions</h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <button className="p-4 rounded-lg bg-neon-cyan/10 border border-neon-cyan/20 hover:bg-neon-cyan/20 transition-all duration-200 text-left">
-            <Network className="w-6 h-6 text-neon-cyan mb-2" />
-            <div className="text-white font-medium">Create New Job</div>
-            <div className="text-sm text-dark-400">Set up network monitoring</div>
-          </button>
-          <button className="p-4 rounded-lg bg-neon-purple/10 border border-neon-purple/20 hover:bg-neon-purple/20 transition-all duration-200 text-left">
-            <Zap className="w-6 h-6 text-neon-purple mb-2" />
-            <div className="text-white font-medium">Run Quick Scan</div>
-            <div className="text-sm text-dark-400">Immediate network scan</div>
-          </button>
-          <button className="p-4 rounded-lg bg-neon-green/10 border border-neon-green/20 hover:bg-neon-green/20 transition-all duration-200 text-left">
-            <Shield className="w-6 h-6 text-neon-green mb-2" />
-            <div className="text-white font-medium">View Reports</div>
-            <div className="text-sm text-dark-400">Analyze network activity</div>
-          </button>
         </div>
       </div>
     </div>

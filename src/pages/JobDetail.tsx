@@ -10,7 +10,9 @@ import {
   Shield,
   Activity,
   AlertTriangle,
-  CheckCircle
+  CheckCircle,
+  X,
+  UserX
 } from 'lucide-react';
 import { api } from '../services/api';
 import { useApp } from '../context/AppContext';
@@ -122,6 +124,48 @@ function JobDetail() {
     }
   };
 
+  const handleRemoveDevice = async (deviceId: string, macAddress: string) => {
+    if (window.confirm(`Are you sure you want to remove device ${macAddress} from known devices?`)) {
+      try {
+        await api.delete(`/jobs/${id}/devices/${deviceId}`);
+        await fetchKnownDevices();
+        toast.success('Device removed successfully');
+      } catch (error) {
+        toast.error('Failed to remove device');
+      }
+    }
+  };
+
+  const handleAddToWhitelist = async (macAddress: string) => {
+    try {
+      const updatedWhitelist = [...(job?.whitelist || []), macAddress];
+      await api.put(`/jobs/${id}`, { 
+        ...job, 
+        whitelist: updatedWhitelist 
+      });
+      await fetchJobDetails();
+      await fetchKnownDevices();
+      toast.success('Device added to whitelist');
+    } catch (error) {
+      toast.error('Failed to add device to whitelist');
+    }
+  };
+
+  const handleRemoveFromWhitelist = async (macAddress: string) => {
+    try {
+      const updatedWhitelist = (job?.whitelist || []).filter(mac => mac !== macAddress);
+      await api.put(`/jobs/${id}`, { 
+        ...job, 
+        whitelist: updatedWhitelist 
+      });
+      await fetchJobDetails();
+      await fetchKnownDevices();
+      toast.success('Device removed from whitelist');
+    } catch (error) {
+      toast.error('Failed to remove device from whitelist');
+    }
+  };
+
   if (loading || !job) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -174,7 +218,10 @@ function JobDetail() {
             <span>{job.status === 'running' ? 'Running...' : 'Run Now'}</span>
           </button>
           
-          <button className="flex items-center space-x-2 px-4 py-2 bg-dark-800 border border-dark-600 rounded-lg hover:bg-dark-700 transition-colors text-white font-medium">
+          <button 
+            onClick={() => navigate(`/jobs/${id}/edit`)}
+            className="flex items-center space-x-2 px-4 py-2 bg-dark-800 border border-dark-600 rounded-lg hover:bg-dark-700 transition-colors text-white font-medium"
+          >
             <Edit3 className="w-4 h-4" />
             <span>Edit</span>
           </button>
@@ -290,8 +337,15 @@ function JobDetail() {
                 {job.whitelist.length > 0 ? (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
                     {job.whitelist.map((mac, index) => (
-                      <div key={index} className="bg-dark-800 px-3 py-2 rounded-lg">
+                      <div key={index} className="flex items-center justify-between bg-dark-800 px-3 py-2 rounded-lg">
                         <span className="text-white font-mono text-sm">{mac}</span>
+                        <button
+                          onClick={() => handleRemoveFromWhitelist(mac)}
+                          className="text-neon-orange hover:text-neon-orange/80 transition-colors"
+                          title="Remove from whitelist"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -356,23 +410,51 @@ function JobDetail() {
                             <p className="text-sm text-dark-400">{device.ip_address} • {device.vendor || 'Unknown vendor'}</p>
                           </div>
                         </div>
-                        <div className="text-right">
-                          <div className="flex items-center space-x-2">
-                            {device.whitelisted ? (
-                              <span className="inline-flex items-center px-2 py-1 rounded text-xs bg-neon-green/10 text-neon-green border border-neon-green/20">
-                                <CheckCircle className="w-3 h-3 mr-1" />
-                                Whitelisted
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center px-2 py-1 rounded text-xs bg-neon-orange/10 text-neon-orange border border-neon-orange/20">
-                                <AlertTriangle className="w-3 h-3 mr-1" />
-                                Unauthorized
-                              </span>
-                            )}
+                        <div className="flex items-center space-x-4">
+                          <div className="text-right">
+                            <div className="flex items-center space-x-2">
+                              {device.whitelisted ? (
+                                <span className="inline-flex items-center px-2 py-1 rounded text-xs bg-neon-green/10 text-neon-green border border-neon-green/20">
+                                  <CheckCircle className="w-3 h-3 mr-1" />
+                                  Whitelisted
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-2 py-1 rounded text-xs bg-neon-orange/10 text-neon-orange border border-neon-orange/20">
+                                  <AlertTriangle className="w-3 h-3 mr-1" />
+                                  Unauthorized
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-dark-500 mt-1">
+                              Last seen: {formatDistanceToNow(new Date(device.last_seen), { addSuffix: true })}
+                            </p>
                           </div>
-                          <p className="text-xs text-dark-500 mt-1">
-                            Last seen: {formatDistanceToNow(new Date(device.last_seen), { addSuffix: true })}
-                          </p>
+                          <div className="flex items-center space-x-2">
+                            {!device.whitelisted ? (
+                              <button
+                                onClick={() => handleAddToWhitelist(device.mac_address)}
+                                className="p-1 rounded hover:bg-dark-700 transition-colors"
+                                title="Add to whitelist"
+                              >
+                                <CheckCircle className="w-4 h-4 text-neon-green hover:text-neon-green/80" />
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleRemoveFromWhitelist(device.mac_address)}
+                                className="p-1 rounded hover:bg-dark-700 transition-colors"
+                                title="Remove from whitelist"
+                              >
+                                <X className="w-4 h-4 text-neon-orange hover:text-neon-orange/80" />
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleRemoveDevice(device.id, device.mac_address)}
+                              className="p-1 rounded hover:bg-dark-700 transition-colors"
+                              title="Remove device"
+                            >
+                              <UserX className="w-4 h-4 text-neon-orange hover:text-neon-orange/80" />
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </div>

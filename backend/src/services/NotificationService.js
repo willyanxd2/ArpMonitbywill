@@ -105,6 +105,24 @@ export class NotificationService {
   }
 
   /**
+   * Delete notification
+   * @param {string} notificationId - Notification ID
+   * @returns {Promise<boolean>} Success status
+   */
+  async deleteNotification(notificationId) {
+    const db = getDatabase();
+    const stmt = db.prepare('DELETE FROM notifications WHERE id = ?');
+    
+    try {
+      const result = stmt.run(notificationId);
+      return result.changes > 0;
+    } catch (error) {
+      logger.error('Failed to delete notification:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Mark all notifications as read for a job
    * @param {string} jobId - Job ID
    * @returns {Promise<number>} Number of notifications marked as read

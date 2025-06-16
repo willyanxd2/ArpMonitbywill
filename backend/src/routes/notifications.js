@@ -37,6 +37,21 @@ router.patch('/:id/read', async (req, res) => {
   }
 });
 
+// Delete notification
+router.delete('/:id', async (req, res) => {
+  try {
+    const success = await notificationService.deleteNotification(req.params.id);
+    if (!success) {
+      return res.status(404).json({ message: 'Notification not found' });
+    }
+    
+    res.json({ message: 'Notification deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting notification:', error);
+    res.status(500).json({ message: 'Failed to delete notification' });
+  }
+});
+
 // Mark all notifications as read for a job
 router.patch('/job/:jobId/read-all', async (req, res) => {
   try {

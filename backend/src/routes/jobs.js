@@ -81,6 +81,9 @@ router.put('/:id', async (req, res) => {
 
     const job = new Job({ ...existingJob, ...req.body, id: req.params.id });
     await job.save();
+
+    // Update whitelist status for known devices
+    await updateDeviceWhitelistStatus(req.params.id, job.whitelist);
     
     res.json({ message: 'Job updated successfully' });
   } catch (error) {
@@ -159,5 +162,40 @@ router.get('/:id/devices', async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch known devices' });
   }
 });
+
+// Remove known device
+router.delete('/:id/devices/:deviceId', async (req, res) => {
+  try {
+    const db = getDatabase();
+    const stmt = db.prepare('DELETE FROM known_devices WHERE id = ? AND job_id = ?');
+    const result = stmt.run(req.params.deviceId, req.params.id);
+    
+    if (result.changes === 0) {
+      return res.status(404).json({ message: 'Device not found' });
+    }
+    
+    res.json({ message: 'Device removed successfully' });
+  } catch (error) {
+    console.error('Error removing device:', error);
+    res.status(500).json({ message: 'Failed to remove device' });
+  }
+});
+
+// Helper function to update device whitelist status
+async function updateDeviceWhitelistStatus(jobId, whitelist) {
+  const db = getDatabase();
+  
+  // Update all devices to not whitelisted first
+  const resetStmt = db.prepare('UPDATE known_devices SET whitelisted = 0 WHERE job_id = ?');
+  resetStmt.run(jobId);
+  
+  // Update whitelisted devices
+  if (whitelist && whitelist.length > 0) {
+    const updateStmt = db.prepare('UPDATE known_devices SET whitelisted = 1 WHERE job_id = ? AND mac_address = ?');
+    for (const mac of whitelist) {
+      updateStmt.run(jobId, mac);
+    }
+  }
+}
 
 export default router;

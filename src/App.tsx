@@ -6,6 +6,8 @@ import Dashboard from './pages/Dashboard';
 import Jobs from './pages/Jobs';
 import JobDetail from './pages/JobDetail';
 import CreateJob from './pages/CreateJob';
+import EditJob from './pages/EditJob';
+import Notifications from './pages/Notifications';
 import { AppProvider } from './context/AppContext';
 
 function App() {
@@ -19,6 +21,8 @@ function App() {
               <Route path="/jobs" element={<Jobs />} />
               <Route path="/jobs/create" element={<CreateJob />} />
               <Route path="/jobs/:id" element={<JobDetail />} />
+              <Route path="/jobs/:id/edit" element={<EditJob />} />
+              <Route path="/notifications" element={<Notifications />} />
             </Routes>
           </Layout>
           <Toaster 

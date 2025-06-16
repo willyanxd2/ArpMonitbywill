@@ -62,7 +62,8 @@ type Action =
   | { type: 'SET_NETWORK_INTERFACES'; payload: string[] }
   | { type: 'UPDATE_JOB'; payload: Job }
   | { type: 'DELETE_JOB'; payload: string }
-  | { type: 'MARK_NOTIFICATION_READ'; payload: string };
+  | { type: 'MARK_NOTIFICATION_READ'; payload: string }
+  | { type: 'DELETE_NOTIFICATION'; payload: string };
 
 function appReducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -93,6 +94,13 @@ function appReducer(state: AppState, action: Action): AppState {
           notification.id === action.payload 
             ? { ...notification, read: true }
             : notification
+        )
+      };
+    case 'DELETE_NOTIFICATION':
+      return {
+        ...state,
+        notifications: state.notifications.filter(notification =>
+          notification.id !== action.payload
         )
       };
     default:
