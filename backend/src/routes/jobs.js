@@ -3,9 +3,12 @@ import { Job } from '../models/Job.js';
 import { JobRunner } from '../services/JobRunner.js';
 import { getDatabase } from '../database/init.js';
 import { NetworkService } from '../services/NetworkService.js';
+import { SSHService } from '../services/SSHService.js';
+import { EncryptionService } from '../services/EncryptionService.js';
 
 const router = express.Router();
 const jobRunner = new JobRunner();
+const sshService = new SSHService();
 
 // Get all jobs
 router.get('/', async (req, res) => {
@@ -35,19 +38,46 @@ router.get('/:id', async (req, res) => {
 // Create new job
 router.post('/', async (req, res) => {
   try {
-    // Validate required fields
-    const { name, network_interface, subnet } = req.body;
+    const { name, job_type } = req.body;
     
-    if (!name || !network_interface || !subnet) {
-      return res.status(400).json({ message: 'Name, network interface, and subnet are required' });
+    if (!name) {
+      return res.status(400).json({ message: 'Job name is required' });
     }
 
-    // Validate interface and subnet compatibility
-    const isValid = await NetworkService.validateInterfaceSubnet(network_interface, subnet);
-    if (!isValid) {
-      return res.status(400).json({ 
-        message: 'Network interface does not have an IP address in the specified subnet' 
-      });
+    if (!job_type) {
+      return res.status(400).json({ message: 'Job type is required' });
+    }
+
+    // Validate based on job type
+    if (job_type === 'arp-scan') {
+      const { network_interface, subnet } = req.body;
+      
+      if (!network_interface || !subnet) {
+        return res.status(400).json({ message: 'Network interface and subnet are required for ARP scan jobs' });
+      }
+
+      // Validate interface and subnet compatibility
+      const isValid = await NetworkService.validateInterfaceSubnet(network_interface, subnet);
+      if (!isValid) {
+        return res.status(400).json({ 
+          message: 'Network interface does not have an IP address in the specified subnet' 
+        });
+      }
+    } else if (job_type === 'ssh') {
+      const { ssh_hosts } = req.body;
+      
+      if (!ssh_hosts || ssh_hosts.length === 0) {
+        return res.status(400).json({ message: 'At least one SSH host is required for SSH jobs' });
+      }
+
+      // Validate SSH hosts
+      for (const host of ssh_hosts) {
+        if (!host.hostname || !host.ip_address || !host.username || !host.password) {
+          return res.status(400).json({ 
+            message: 'Hostname, IP address, username, and password are required for all SSH hosts' 
+          });
+        }
+      }
     }
 
     const job = new Job(req.body);
@@ -68,18 +98,34 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Job not found' });
     }
 
-    // Validate interface and subnet if they're being updated
-    const { network_interface, subnet } = req.body;
-    if (network_interface && subnet) {
-      const isValid = await NetworkService.validateInterfaceSubnet(network_interface, subnet);
-      if (!isValid) {
-        return res.status(400).json({ 
-          message: 'Network interface does not have an IP address in the specified subnet' 
-        });
+    // Validate based on job type (job type cannot be changed)
+    const jobType = existingJob.job_type;
+    
+    if (jobType === 'arp-scan') {
+      const { network_interface, subnet } = req.body;
+      if (network_interface && subnet) {
+        const isValid = await NetworkService.validateInterfaceSubnet(network_interface, subnet);
+        if (!isValid) {
+          return res.status(400).json({ 
+            message: 'Network interface does not have an IP address in the specified subnet' 
+          });
+        }
+      }
+    } else if (jobType === 'ssh') {
+      const { ssh_hosts } = req.body;
+      if (ssh_hosts && ssh_hosts.length > 0) {
+        // Validate SSH hosts
+        for (const host of ssh_hosts) {
+          if (!host.hostname || !host.ip_address || !host.username || !host.password) {
+            return res.status(400).json({ 
+              message: 'Hostname, IP address, username, and password are required for all SSH hosts' 
+            });
+          }
+        }
       }
     }
 
-    const job = new Job({ ...existingJob, ...req.body, id: req.params.id });
+    const job = new Job({ ...existingJob, ...req.body, id: req.params.id, job_type: jobType });
     await job.save();
 
     // Update whitelist status for known devices
@@ -123,6 +169,110 @@ router.post('/:id/run', async (req, res) => {
   } catch (error) {
     console.error('Error starting job:', error);
     res.status(500).json({ message: 'Failed to start job' });
+  }
+});
+
+// Test SSH connection
+router.post('/:id/test-ssh', async (req, res) => {
+  try {
+    const { hostId } = req.body;
+    
+    if (!hostId) {
+      return res.status(400).json({ message: 'Host ID is required' });
+    }
+
+    const db = getDatabase();
+    const hostStmt = db.prepare('SELECT * FROM ssh_hosts WHERE id = ? AND job_id = ?');
+    const host = hostStmt.get(hostId, req.params.id);
+    
+    if (!host) {
+      return res.status(404).json({ message: 'SSH host not found' });
+    }
+
+    const success = await sshService.testConnection(host);
+    
+    // Update connection status
+    const updateStmt = db.prepare('UPDATE ssh_hosts SET connection_status = ?, last_tested = CURRENT_TIMESTAMP WHERE id = ?');
+    updateStmt.run(success ? 'connected' : 'failed', hostId);
+    
+    res.json({ 
+      success, 
+      message: success ? 'Connection successful' : 'Connection failed',
+      hostname: host.hostname,
+      ip_address: host.ip_address
+    });
+  } catch (error) {
+    console.error('Error testing SSH connection:', error);
+    res.status(500).json({ message: 'Failed to test SSH connection' });
+  }
+});
+
+// Execute SSH command (for console feature)
+router.post('/:id/ssh-command', async (req, res) => {
+  try {
+    const { hostId, command } = req.body;
+    
+    if (!hostId || !command) {
+      return res.status(400).json({ message: 'Host ID and command are required' });
+    }
+
+    const db = getDatabase();
+    const hostStmt = db.prepare('SELECT * FROM ssh_hosts WHERE id = ? AND job_id = ?');
+    const host = hostStmt.get(hostId, req.params.id);
+    
+    if (!host) {
+      return res.status(404).json({ message: 'SSH host not found' });
+    }
+
+    const result = await sshService.executeCommand(host, command);
+    
+    // Save command to console sessions
+    const sessionStmt = db.prepare(`
+      INSERT INTO ssh_console_sessions (id, job_id, host_id, command, output, status)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    
+    const sessionId = require('uuid').v4();
+    sessionStmt.run(
+      sessionId, 
+      req.params.id, 
+      hostId, 
+      command, 
+      result.stdout || result.stderr, 
+      result.code === 0 ? 'success' : 'failed'
+    );
+    
+    res.json({
+      success: result.code === 0,
+      output: result.stdout,
+      error: result.stderr,
+      code: result.code,
+      sessionId
+    });
+  } catch (error) {
+    console.error('Error executing SSH command:', error);
+    res.status(500).json({ message: 'Failed to execute SSH command', error: error.message });
+  }
+});
+
+// Get SSH console sessions
+router.get('/:id/console-sessions', async (req, res) => {
+  try {
+    const db = getDatabase();
+    const stmt = db.prepare(`
+      SELECT s.*, h.hostname, h.ip_address 
+      FROM ssh_console_sessions s
+      JOIN ssh_hosts h ON s.host_id = h.id
+      WHERE s.job_id = ? 
+      ORDER BY s.executed_at DESC 
+      LIMIT 50
+    `);
+    
+    const sessions = stmt.all(req.params.id);
+    res.json(sessions);
+  } catch (error) {
+    console.error('Error fetching console sessions:', error);
+    res.status(500).json({ message: 'Failed to fetch console sessions' });
   }
 });
 
