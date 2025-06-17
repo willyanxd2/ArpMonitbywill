@@ -30,12 +30,13 @@ export async function initializeDatabase() {
   
   // Create tables
   const createTables = `
-    -- Jobs table
+    -- Jobs table (updated to support SSH jobs)
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
-      network_interface TEXT NOT NULL,
-      subnet TEXT NOT NULL,
+      job_type TEXT DEFAULT 'arp-scan' CHECK (job_type IN ('arp-scan', 'ssh-scan')),
+      network_interface TEXT,
+      subnet TEXT,
       execution_time INTEGER DEFAULT 300,
       schedule TEXT DEFAULT 'manual',
       notifications_enabled BOOLEAN DEFAULT 1,
@@ -45,10 +46,24 @@ export async function initializeDatabase() {
       retention_policy TEXT DEFAULT 'days',
       retention_days INTEGER DEFAULT 30,
       status TEXT DEFAULT 'active',
+      vlan_id INTEGER,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       last_run DATETIME,
       next_run DATETIME
+    );
+
+    -- SSH hosts table for SSH jobs
+    CREATE TABLE IF NOT EXISTS ssh_hosts (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      ip_address TEXT NOT NULL,
+      port INTEGER DEFAULT 22,
+      username TEXT NOT NULL,
+      password TEXT NOT NULL, -- encrypted
+      interface TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (job_id) REFERENCES jobs (id) ON DELETE CASCADE
     );
 
     -- Job whitelist table
@@ -77,14 +92,18 @@ export async function initializeDatabase() {
       FOREIGN KEY (job_id) REFERENCES jobs (id) ON DELETE CASCADE
     );
 
-    -- Known devices table (one per job)
+    -- Known devices table (updated for SSH jobs)
     CREATE TABLE IF NOT EXISTS known_devices (
       id TEXT PRIMARY KEY,
       job_id TEXT NOT NULL,
       mac_address TEXT NOT NULL,
-      ip_address TEXT NOT NULL,
+      ip_address TEXT, -- nullable for SSH jobs
       vendor TEXT,
       whitelisted BOOLEAN DEFAULT 0,
+      vlan_id INTEGER, -- for SSH jobs
+      interface TEXT, -- device interface for SSH jobs
+      host_ip TEXT, -- SSH host IP for SSH jobs
+      host_interface TEXT, -- SSH host interface for SSH jobs
       first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
       last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
       status TEXT DEFAULT 'active',
@@ -100,29 +119,35 @@ export async function initializeDatabase() {
       type TEXT NOT NULL, -- 'information', 'warning'
       message TEXT NOT NULL,
       mac_address TEXT NOT NULL,
-      ip_address TEXT NOT NULL,
+      ip_address TEXT, -- nullable for SSH jobs
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       read BOOLEAN DEFAULT 0,
       FOREIGN KEY (job_id) REFERENCES jobs (id) ON DELETE CASCADE
     );
 
-    -- Device history table for tracking IP changes
+    -- Device history table for tracking changes (updated for SSH jobs)
     CREATE TABLE IF NOT EXISTS device_history (
       id TEXT PRIMARY KEY,
       job_id TEXT NOT NULL,
       mac_address TEXT NOT NULL,
-      ip_address TEXT NOT NULL,
+      ip_address TEXT, -- nullable for SSH jobs
       vendor TEXT,
+      vlan_id INTEGER, -- for SSH jobs
+      interface TEXT, -- device interface for SSH jobs
+      host_ip TEXT, -- SSH host IP for SSH jobs
       detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (job_id) REFERENCES jobs (id) ON DELETE CASCADE
     );
 
     -- Indexes for better performance
     CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+    CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(job_type);
     CREATE INDEX IF NOT EXISTS idx_jobs_next_run ON jobs(next_run);
+    CREATE INDEX IF NOT EXISTS idx_ssh_hosts_job_id ON ssh_hosts(job_id);
     CREATE INDEX IF NOT EXISTS idx_job_runs_job_id ON job_runs(job_id);
     CREATE INDEX IF NOT EXISTS idx_known_devices_job_id ON known_devices(job_id);
     CREATE INDEX IF NOT EXISTS idx_known_devices_mac ON known_devices(mac_address);
+    CREATE INDEX IF NOT EXISTS idx_known_devices_host ON known_devices(host_ip);
     CREATE INDEX IF NOT EXISTS idx_notifications_job_id ON notifications(job_id);
     CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(read);
     CREATE INDEX IF NOT EXISTS idx_device_history_job_id ON device_history(job_id);

@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import winston from 'winston';
 import { getDatabase } from '../database/init.js';
 import { ArpScanner } from './ArpScanner.js';
+import { SSHScanner } from './SSHScanner.js';
 import { NotificationService } from './NotificationService.js';
 
 const logger = winston.createLogger({
@@ -20,7 +21,8 @@ const logger = winston.createLogger({
 export class JobRunner {
   constructor() {
     this.runningJobs = new Map();
-    this.scanner = new ArpScanner();
+    this.arpScanner = new ArpScanner();
+    this.sshScanner = new SSHScanner();
     this.notificationService = new NotificationService();
   }
 
@@ -48,7 +50,7 @@ export class JobRunner {
     const whitelistStmt = db.prepare('SELECT mac_address FROM job_whitelist WHERE job_id = ?');
     const whitelist = new Set(whitelistStmt.all(jobId).map(row => row.mac_address));
 
-    logger.info(`Starting job: ${job.name} (${jobId})`);
+    logger.info(`Starting job: ${job.name} (${jobId}) - Type: ${job.job_type}`);
 
     // Create job run record
     const runId = uuidv4();
@@ -65,8 +67,25 @@ export class JobRunner {
     this.runningJobs.set(jobId, { runId, startTime: Date.now() });
 
     try {
-      // Perform ARP scan
-      const devices = await this.scanner.scan(job.network_interface, job.subnet, job.execution_time);
+      let devices = [];
+      
+      if (job.job_type === 'arp-scan') {
+        // Perform ARP scan
+        devices = await this.arpScanner.scan(job.network_interface, job.subnet, job.execution_time);
+      } else if (job.job_type === 'ssh-scan') {
+        // Get SSH hosts for this job
+        const hostsStmt = db.prepare('SELECT * FROM ssh_hosts WHERE job_id = ?');
+        const sshHosts = hostsStmt.all(jobId);
+        
+        if (sshHosts.length === 0) {
+          throw new Error('No SSH hosts configured for this job');
+        }
+
+        // Perform SSH scan
+        devices = await this.sshScanner.scan(sshHosts, job.vlan_id, 30);
+      } else {
+        throw new Error(`Unknown job type: ${job.job_type}`);
+      }
       
       // Process discovered devices
       const result = await this._processDevices(jobId, devices, whitelist, job);
@@ -135,12 +154,21 @@ export class JobRunner {
         newDevices++;
         
         // Add to known devices
-        const insertDeviceStmt = db.prepare(`
-          INSERT INTO known_devices 
-          (id, job_id, mac_address, ip_address, vendor, whitelisted, first_seen, last_seen, status)
-          VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'active')
-        `);
-        insertDeviceStmt.run(uuidv4(), jobId, device.mac, device.ip, device.vendor, isWhitelisted ? 1 : 0);
+        if (job.job_type === 'arp-scan') {
+          const insertDeviceStmt = db.prepare(`
+            INSERT INTO known_devices 
+            (id, job_id, mac_address, ip_address, vendor, whitelisted, first_seen, last_seen, status)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'active')
+          `);
+          insertDeviceStmt.run(uuidv4(), jobId, device.mac, device.ip, device.vendor, isWhitelisted ? 1 : 0);
+        } else if (job.job_type === 'ssh-scan') {
+          const insertDeviceStmt = db.prepare(`
+            INSERT INTO known_devices 
+            (id, job_id, mac_address, vlan_id, interface, host_ip, host_interface, whitelisted, first_seen, last_seen, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'active')
+          `);
+          insertDeviceStmt.run(uuidv4(), jobId, device.mac, device.vlan_id, device.interface, device.host_ip, device.host_interface, isWhitelisted ? 1 : 0);
+        }
 
         // Generate notification
         if (job.notifications_enabled) {
@@ -151,7 +179,7 @@ export class JobRunner {
               type: 'information',
               message: `New authorized device discovered: ${device.mac}`,
               mac_address: device.mac,
-              ip_address: device.ip
+              ip_address: device.ip || null
             });
           } else if (!isWhitelisted && job.notify_unauthorized_macs) {
             warnings++;
@@ -161,41 +189,63 @@ export class JobRunner {
               type: 'warning',
               message: `Unauthorized device detected: ${device.mac}`,
               mac_address: device.mac,
-              ip_address: device.ip
+              ip_address: device.ip || null
             });
           }
         }
       } else {
-        // Existing device - check for IP changes
-        if (existingDevice.ip_address !== device.ip && job.notifications_enabled && job.notify_ip_changes) {
-          await this.notificationService.createNotification({
-            job_id: jobId,
-            job_name: job.name,
-            type: 'information',
-            message: `Device ${device.mac} changed IP from ${existingDevice.ip_address} to ${device.ip}`,
-            mac_address: device.mac,
-            ip_address: device.ip
-          });
+        // Existing device - check for changes
+        let hasChanges = false;
+        
+        if (job.job_type === 'arp-scan' && existingDevice.ip_address !== device.ip) {
+          hasChanges = true;
+          if (job.notifications_enabled && job.notify_ip_changes) {
+            await this.notificationService.createNotification({
+              job_id: jobId,
+              job_name: job.name,
+              type: 'information',
+              message: `Device ${device.mac} changed IP from ${existingDevice.ip_address} to ${device.ip}`,
+              mac_address: device.mac,
+              ip_address: device.ip
+            });
+          }
         }
 
-        // Update last seen and IP
-        const updateDeviceStmt = db.prepare(`
-          UPDATE known_devices 
-          SET ip_address = ?, vendor = ?, last_seen = CURRENT_TIMESTAMP, status = 'active'
-          WHERE job_id = ? AND mac_address = ?
-        `);
-        updateDeviceStmt.run(device.ip, device.vendor, jobId, device.mac);
+        // Update last seen and other fields
+        if (job.job_type === 'arp-scan') {
+          const updateDeviceStmt = db.prepare(`
+            UPDATE known_devices 
+            SET ip_address = ?, vendor = ?, last_seen = CURRENT_TIMESTAMP, status = 'active'
+            WHERE job_id = ? AND mac_address = ?
+          `);
+          updateDeviceStmt.run(device.ip, device.vendor, jobId, device.mac);
+        } else if (job.job_type === 'ssh-scan') {
+          const updateDeviceStmt = db.prepare(`
+            UPDATE known_devices 
+            SET vlan_id = ?, interface = ?, host_ip = ?, host_interface = ?, last_seen = CURRENT_TIMESTAMP, status = 'active'
+            WHERE job_id = ? AND mac_address = ?
+          `);
+          updateDeviceStmt.run(device.vlan_id, device.interface, device.host_ip, device.host_interface, jobId, device.mac);
+        }
 
         // Remove from knownDevices map to track which devices were not seen
         knownDevices.delete(device.mac);
       }
 
       // Add to device history
-      const insertHistoryStmt = db.prepare(`
-        INSERT INTO device_history (id, job_id, mac_address, ip_address, vendor, detected_at)
-        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-      `);
-      insertHistoryStmt.run(uuidv4(), jobId, device.mac, device.ip, device.vendor);
+      if (job.job_type === 'arp-scan') {
+        const insertHistoryStmt = db.prepare(`
+          INSERT INTO device_history (id, job_id, mac_address, ip_address, vendor, detected_at)
+          VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        `);
+        insertHistoryStmt.run(uuidv4(), jobId, device.mac, device.ip, device.vendor);
+      } else if (job.job_type === 'ssh-scan') {
+        const insertHistoryStmt = db.prepare(`
+          INSERT INTO device_history (id, job_id, mac_address, vlan_id, interface, host_ip, detected_at)
+          VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        `);
+        insertHistoryStmt.run(uuidv4(), jobId, device.mac, device.vlan_id, device.interface, device.host_ip);
+      }
     }
 
     // Mark devices that were not seen as inactive
