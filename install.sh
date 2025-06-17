@@ -57,29 +57,29 @@ check_os() {
 }
 
 # Check system requirements
-check_requirements() {
-    log "Checking system requirements..."
+#check_requirements() {
+ #   log "Checking system requirements..."
 
-    # Check available memory (minimum 1GB)
-    local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    local mem_gb=$((mem_kb / 1024 / 1024))
+  #  # Check available memory (minimum 1GB)
+   # local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+   # local mem_gb=$((mem_kb / 1024 / 1024))
 
-    if [[ $mem_gb -lt 1 ]]; then
-        error "Insufficient memory. Minimum 1GB required, found ${mem_gb}GB"
-        exit 1
-    fi
+   # if [[ $mem_gb -lt 1 ]]; then
+    #    error "Insufficient memory. Minimum 1GB required, found ${mem_gb}GB"
+     #   exit 1
+   # fi
 
-    # Check available disk space (minimum 2GB)
-    local disk_gb=$(df / | awk 'NR==2 {print int($4/1024/1024)}')
+   # # Check available disk space (minimum 2GB)
+   # local disk_gb=$(df / | awk 'NR==2 {print int($4/1024/1024)}')
 
-    if [[ $disk_gb -lt 2 ]]; then
-        error "Insufficient disk space. Minimum 2GB required, found ${disk_gb}GB available"
-        exit 1
-    fi
+   # if [[ $disk_gb -lt 2 ]]; then
+    #    error "Insufficient disk space. Minimum 2GB required, found ${disk_gb}GB available"
+     #   exit 1
+   # fi
 
-    log "System requirements met ✓"
-    info "Memory: ${mem_gb}GB, Disk space: ${disk_gb}GB available"
-}
+   # log "System requirements met ✓"
+   # info "Memory: ${mem_gb}GB, Disk space: ${disk_gb}GB available"
+#}
 
 # Install system dependencies
 install_system_deps() {
@@ -246,23 +246,23 @@ init_database() {
 }
 
 # Configure firewall
-configure_firewall() {
-    log "Configuring firewall..."
+#configure_firewall() {
+ #   log "Configuring firewall..."
 
     # Start and enable firewalld
-    sudo systemctl start firewalld
-    sudo systemctl enable firewalld
+  #  sudo systemctl start firewalld
+   # sudo systemctl enable firewalld
 
     # Open ports for the application
-    sudo firewall-cmd --permanent --add-port=3001/tcp  # Backend API
-    sudo firewall-cmd --permanent --add-port=5173/tcp  # Frontend dev server
+   # sudo firewall-cmd --permanent --add-port=3001/tcp  # Backend API
+ #   sudo firewall-cmd --permanent --add-port=5173/tcp  # Frontend dev server
 
     # Reload firewall
-    sudo firewall-cmd --reload
+  #  sudo firewall-cmd --reload
 
-    log "Firewall configured ✓"
-    info "Opened ports: 3001 (API), 5173 (Frontend)"
-}
+   # log "Firewall configured ✓"
+   # info "Opened ports: 3001 (API), 5173 (Frontend)"
+#}
 
 # Create systemd service
 create_systemd_service() {
@@ -1007,9 +1007,9 @@ main() {
     log "Target OS: Rocky Linux 9"
     echo
 
-   
+
     check_os
-    check_requirements
+#    check_requirements
     install_system_deps
     install_nodejs
     verify_arpscan
@@ -1017,7 +1017,7 @@ main() {
     copy_app_files
     install_app_deps
     init_database
-    configure_firewall
+ #   configure_firewall
     create_systemd_service
     create_start_script
     create_troubleshooting_guide
