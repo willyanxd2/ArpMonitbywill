@@ -3,6 +3,8 @@ import { Job } from '../models/Job.js';
 import { JobRunner } from '../services/JobRunner.js';
 import { getDatabase } from '../database/init.js';
 import { NetworkService } from '../services/NetworkService.js';
+import { SshMacTableScanner } from '../services/SshMacTableScanner.js';
+import { EncryptionService } from '../services/EncryptionService.js';
 
 const router = express.Router();
 const jobRunner = new JobRunner();
@@ -11,7 +13,17 @@ const jobRunner = new JobRunner();
 router.get('/', async (req, res) => {
   try {
     const jobs = await Job.findAll();
-    res.json(jobs);
+    
+    // Mask passwords in SSH hosts
+    const maskedJobs = jobs.map(job => ({
+      ...job,
+      ssh_hosts: job.ssh_hosts?.map(host => ({
+        ...host,
+        password: EncryptionService.maskPassword(host.password)
+      })) || []
+    }));
+    
+    res.json(maskedJobs);
   } catch (error) {
     console.error('Error fetching jobs:', error);
     res.status(500).json({ message: 'Failed to fetch jobs' });
@@ -25,6 +37,15 @@ router.get('/:id', async (req, res) => {
     if (!job) {
       return res.status(404).json({ message: 'Job not found' });
     }
+    
+    // Mask passwords in SSH hosts
+    if (job.ssh_hosts) {
+      job.ssh_hosts = job.ssh_hosts.map(host => ({
+        ...host,
+        password: EncryptionService.maskPassword(host.password)
+      }));
+    }
+    
     res.json(job);
   } catch (error) {
     console.error('Error fetching job:', error);
@@ -35,22 +56,50 @@ router.get('/:id', async (req, res) => {
 // Create new job
 router.post('/', async (req, res) => {
   try {
-    // Validate required fields
-    const { name, network_interface, subnet } = req.body;
+    // Validate required fields based on job type
+    const { name, type = 'arp-scan' } = req.body;
     
-    if (!name || !network_interface || !subnet) {
-      return res.status(400).json({ message: 'Name, network interface, and subnet are required' });
+    if (!name) {
+      return res.status(400).json({ message: 'Job name is required' });
     }
 
-    // Validate interface and subnet compatibility
-    const isValid = await NetworkService.validateInterfaceSubnet(network_interface, subnet);
-    if (!isValid) {
-      return res.status(400).json({ 
-        message: 'Network interface does not have an IP address in the specified subnet' 
-      });
+    if (type === 'arp-scan') {
+      const { network_interface, subnet } = req.body;
+      if (!network_interface || !subnet) {
+        return res.status(400).json({ message: 'Network interface and subnet are required for ARP scan jobs' });
+      }
+
+      // Validate interface and subnet compatibility
+      const isValid = await NetworkService.validateInterfaceSubnet(network_interface, subnet);
+      if (!isValid) {
+        return res.status(400).json({ 
+          message: 'Network interface does not have an IP address in the specified subnet' 
+        });
+      }
+    } else if (type === 'ssh-mac-table') {
+      const { ssh_hosts } = req.body;
+      if (!ssh_hosts || ssh_hosts.length === 0) {
+        return res.status(400).json({ message: 'At least one SSH host is required for SSH MAC table jobs' });
+      }
+
+      // Validate SSH hosts
+      for (const host of ssh_hosts) {
+        if (!host.host_ip || !host.username || !host.password) {
+          return res.status(400).json({ message: 'Host IP, username, and password are required for each SSH host' });
+        }
+      }
     }
 
-    const job = new Job(req.body);
+    // Encrypt SSH passwords
+    const jobData = { ...req.body };
+    if (jobData.ssh_hosts) {
+      jobData.ssh_hosts = jobData.ssh_hosts.map(host => ({
+        ...host,
+        password: EncryptionService.encrypt(host.password)
+      }));
+    }
+
+    const job = new Job(jobData);
     await job.save();
     
     res.status(201).json({ message: 'Job created successfully', id: job.id });
@@ -68,18 +117,36 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Job not found' });
     }
 
-    // Validate interface and subnet if they're being updated
-    const { network_interface, subnet } = req.body;
-    if (network_interface && subnet) {
-      const isValid = await NetworkService.validateInterfaceSubnet(network_interface, subnet);
-      if (!isValid) {
-        return res.status(400).json({ 
-          message: 'Network interface does not have an IP address in the specified subnet' 
-        });
+    // Prevent changing job type after creation
+    if (req.body.type && req.body.type !== existingJob.type) {
+      return res.status(400).json({ message: 'Job type cannot be changed after creation' });
+    }
+
+    // Validate based on job type
+    if (existingJob.type === 'arp-scan') {
+      const { network_interface, subnet } = req.body;
+      if (network_interface && subnet) {
+        const isValid = await NetworkService.validateInterfaceSubnet(network_interface, subnet);
+        if (!isValid) {
+          return res.status(400).json({ 
+            message: 'Network interface does not have an IP address in the specified subnet' 
+          });
+        }
       }
     }
 
-    const job = new Job({ ...existingJob, ...req.body, id: req.params.id });
+    // Encrypt SSH passwords if provided
+    const jobData = { ...existingJob, ...req.body, id: req.params.id };
+    if (jobData.ssh_hosts) {
+      jobData.ssh_hosts = jobData.ssh_hosts.map(host => ({
+        ...host,
+        password: host.password.startsWith('*') 
+          ? existingJob.ssh_hosts?.find(h => h.id === host.id)?.password || host.password
+          : EncryptionService.encrypt(host.password)
+      }));
+    }
+
+    const job = new Job(jobData);
     await job.save();
 
     // Update whitelist status for known devices
@@ -104,6 +171,30 @@ router.delete('/:id', async (req, res) => {
   } catch (error) {
     console.error('Error deleting job:', error);
     res.status(500).json({ message: 'Failed to delete job' });
+  }
+});
+
+// Test SSH connection
+router.post('/:id/test-ssh', async (req, res) => {
+  try {
+    const { host_ip, username, password, port = 22 } = req.body;
+    
+    if (!host_ip || !username || !password) {
+      return res.status(400).json({ message: 'Host IP, username, and password are required' });
+    }
+
+    const testHost = {
+      host_ip,
+      username,
+      password: EncryptionService.encrypt(password),
+      port
+    };
+
+    const result = await SshMacTableScanner.testConnection(testHost);
+    res.json(result);
+  } catch (error) {
+    console.error('Error testing SSH connection:', error);
+    res.status(500).json({ message: 'Failed to test SSH connection' });
   }
 });
 

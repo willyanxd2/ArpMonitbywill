@@ -5,6 +5,7 @@ export class Job {
   constructor(data) {
     this.id = data.id || uuidv4();
     this.name = data.name;
+    this.type = data.type || 'arp-scan'; // 'arp-scan' or 'ssh-mac-table'
     this.network_interface = data.network_interface;
     this.subnet = data.subnet;
     this.execution_time = data.execution_time || 300;
@@ -17,6 +18,10 @@ export class Job {
     this.retention_days = data.retention_days || 30;
     this.status = data.status || 'active';
     this.whitelist = data.whitelist || [];
+    
+    // SSH specific fields
+    this.ssh_hosts = data.ssh_hosts || [];
+    this.vlan_id = data.vlan_id;
   }
 
   async save() {
@@ -25,6 +30,7 @@ export class Job {
     const jobData = {
       id: this.id,
       name: this.name,
+      type: this.type,
       network_interface: this.network_interface,
       subnet: this.subnet,
       execution_time: this.execution_time,
@@ -35,23 +41,42 @@ export class Job {
       notify_ip_changes: this.notify_ip_changes ? 1 : 0,
       retention_policy: this.retention_policy,
       retention_days: this.retention_days,
-      status: this.status
+      status: this.status,
+      vlan_id: this.vlan_id
     };
 
     // Start transaction
     const transaction = db.transaction(() => {
-      // Insert/update job
-      const stmt = db.prepare(`
-        INSERT OR REPLACE INTO jobs 
-        (id, name, network_interface, subnet, execution_time, schedule, notifications_enabled, 
-         notify_new_macs, notify_unauthorized_macs, notify_ip_changes, retention_policy, 
-         retention_days, status)
-        VALUES 
-        (@id, @name, @network_interface, @subnet, @execution_time, @schedule, @notifications_enabled,
-         @notify_new_macs, @notify_unauthorized_macs, @notify_ip_changes, @retention_policy,
-         @retention_days, @status)
-      `);
-      stmt.run(jobData);
+      // Check if job exists
+      const existingJob = db.prepare('SELECT id FROM jobs WHERE id = ?').get(this.id);
+      
+      if (existingJob) {
+        // Update existing job - preserve ID
+        const stmt = db.prepare(`
+          UPDATE jobs SET 
+          name = @name, type = @type, network_interface = @network_interface, 
+          subnet = @subnet, execution_time = @execution_time, schedule = @schedule, 
+          notifications_enabled = @notifications_enabled, notify_new_macs = @notify_new_macs, 
+          notify_unauthorized_macs = @notify_unauthorized_macs, notify_ip_changes = @notify_ip_changes, 
+          retention_policy = @retention_policy, retention_days = @retention_days, 
+          status = @status, vlan_id = @vlan_id, updated_at = CURRENT_TIMESTAMP
+          WHERE id = @id
+        `);
+        stmt.run(jobData);
+      } else {
+        // Insert new job
+        const stmt = db.prepare(`
+          INSERT INTO jobs 
+          (id, name, type, network_interface, subnet, execution_time, schedule, notifications_enabled, 
+           notify_new_macs, notify_unauthorized_macs, notify_ip_changes, retention_policy, 
+           retention_days, status, vlan_id)
+          VALUES 
+          (@id, @name, @type, @network_interface, @subnet, @execution_time, @schedule, @notifications_enabled,
+           @notify_new_macs, @notify_unauthorized_macs, @notify_ip_changes, @retention_policy,
+           @retention_days, @status, @vlan_id)
+        `);
+        stmt.run(jobData);
+      }
 
       // Clear existing whitelist
       const clearWhitelist = db.prepare('DELETE FROM job_whitelist WHERE job_id = ?');
@@ -66,6 +91,33 @@ export class Job {
         
         for (const mac of this.whitelist) {
           insertWhitelist.run(uuidv4(), this.id, mac);
+        }
+      }
+
+      // Handle SSH hosts for SSH type jobs
+      if (this.type === 'ssh-mac-table') {
+        // Clear existing SSH hosts
+        const clearSshHosts = db.prepare('DELETE FROM job_ssh_hosts WHERE job_id = ?');
+        clearSshHosts.run(this.id);
+
+        // Insert new SSH hosts
+        if (this.ssh_hosts && this.ssh_hosts.length > 0) {
+          const insertSshHost = db.prepare(`
+            INSERT INTO job_ssh_hosts (id, job_id, host_ip, username, password, port, interface_name) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `);
+          
+          for (const host of this.ssh_hosts) {
+            insertSshHost.run(
+              uuidv4(), 
+              this.id, 
+              host.host_ip, 
+              host.username, 
+              host.password, // Will be encrypted in service layer
+              host.port || 22,
+              host.interface_name
+            );
+          }
         }
       }
     });
@@ -85,13 +137,21 @@ export class Job {
     const whitelistStmt = db.prepare('SELECT mac_address FROM job_whitelist WHERE job_id = ?');
     const whitelist = whitelistStmt.all(id).map(row => row.mac_address);
 
+    // Get SSH hosts if SSH type job
+    let ssh_hosts = [];
+    if (jobData.type === 'ssh-mac-table') {
+      const sshHostsStmt = db.prepare('SELECT * FROM job_ssh_hosts WHERE job_id = ?');
+      ssh_hosts = sshHostsStmt.all(id);
+    }
+
     return {
       ...jobData,
       notifications_enabled: Boolean(jobData.notifications_enabled),
       notify_new_macs: Boolean(jobData.notify_new_macs),
       notify_unauthorized_macs: Boolean(jobData.notify_unauthorized_macs),
       notify_ip_changes: Boolean(jobData.notify_ip_changes),
-      whitelist
+      whitelist,
+      ssh_hosts
     };
   }
 
@@ -100,8 +160,9 @@ export class Job {
     const stmt = db.prepare('SELECT * FROM jobs ORDER BY created_at DESC');
     const jobs = stmt.all();
 
-    // Get whitelist for each job
+    // Get whitelist and SSH hosts for each job
     const whitelistStmt = db.prepare('SELECT mac_address FROM job_whitelist WHERE job_id = ?');
+    const sshHostsStmt = db.prepare('SELECT * FROM job_ssh_hosts WHERE job_id = ?');
     
     return jobs.map(job => ({
       ...job,
@@ -109,7 +170,8 @@ export class Job {
       notify_new_macs: Boolean(job.notify_new_macs),
       notify_unauthorized_macs: Boolean(job.notify_unauthorized_macs),
       notify_ip_changes: Boolean(job.notify_ip_changes),
-      whitelist: whitelistStmt.all(job.id).map(row => row.mac_address)
+      whitelist: whitelistStmt.all(job.id).map(row => row.mac_address),
+      ssh_hosts: job.type === 'ssh-mac-table' ? sshHostsStmt.all(job.id) : []
     }));
   }
 

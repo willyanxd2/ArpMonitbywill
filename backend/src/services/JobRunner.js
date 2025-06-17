@@ -2,7 +2,9 @@ import { v4 as uuidv4 } from 'uuid';
 import winston from 'winston';
 import { getDatabase } from '../database/init.js';
 import { ArpScanner } from './ArpScanner.js';
+import { SshMacTableScanner } from './SshMacTableScanner.js';
 import { NotificationService } from './NotificationService.js';
+import { EncryptionService } from './EncryptionService.js';
 
 const logger = winston.createLogger({
   level: 'info',
@@ -20,7 +22,8 @@ const logger = winston.createLogger({
 export class JobRunner {
   constructor() {
     this.runningJobs = new Map();
-    this.scanner = new ArpScanner();
+    this.arpScanner = new ArpScanner();
+    this.sshScanner = new SshMacTableScanner();
     this.notificationService = new NotificationService();
   }
 
@@ -48,7 +51,7 @@ export class JobRunner {
     const whitelistStmt = db.prepare('SELECT mac_address FROM job_whitelist WHERE job_id = ?');
     const whitelist = new Set(whitelistStmt.all(jobId).map(row => row.mac_address));
 
-    logger.info(`Starting job: ${job.name} (${jobId})`);
+    logger.info(`Starting job: ${job.name} (${jobId}) - Type: ${job.type}`);
 
     // Create job run record
     const runId = uuidv4();
@@ -65,8 +68,25 @@ export class JobRunner {
     this.runningJobs.set(jobId, { runId, startTime: Date.now() });
 
     try {
-      // Perform ARP scan
-      const devices = await this.scanner.scan(job.network_interface, job.subnet, job.execution_time);
+      let devices = [];
+      
+      if (job.type === 'ssh-mac-table') {
+        // SSH MAC table scan
+        const sshHostsStmt = db.prepare('SELECT * FROM job_ssh_hosts WHERE job_id = ?');
+        const sshHosts = sshHostsStmt.all(jobId);
+        
+        if (sshHosts.length === 0) {
+          throw new Error('No SSH hosts configured for this job');
+        }
+
+        devices = await this.sshScanner.scan(sshHosts, job.vlan_id, 30);
+      } else {
+        // ARP scan
+        if (!job.network_interface || !job.subnet) {
+          throw new Error('Network interface and subnet are required for ARP scan');
+        }
+        devices = await this.arpScanner.scan(job.network_interface, job.subnet, job.execution_time);
+      }
       
       // Process discovered devices
       const result = await this._processDevices(jobId, devices, whitelist, job);
@@ -122,13 +142,20 @@ export class JobRunner {
     const knownDevices = new Map();
     
     for (const device of knownDevicesStmt.all(jobId)) {
-      knownDevices.set(device.mac_address, device);
+      // Create unique key based on job type
+      const key = job.type === 'ssh-mac-table' 
+        ? `${device.mac_address}:${device.host_ip}`
+        : device.mac_address;
+      knownDevices.set(key, device);
     }
 
     // Process each discovered device
     for (const device of devices) {
       const isWhitelisted = whitelist.has(device.mac);
-      const existingDevice = knownDevices.get(device.mac);
+      const deviceKey = job.type === 'ssh-mac-table' 
+        ? `${device.mac}:${device.host_ip}`
+        : device.mac;
+      const existingDevice = knownDevices.get(deviceKey);
 
       if (!existingDevice) {
         // New device discovered
@@ -137,10 +164,19 @@ export class JobRunner {
         // Add to known devices
         const insertDeviceStmt = db.prepare(`
           INSERT INTO known_devices 
-          (id, job_id, mac_address, ip_address, vendor, whitelisted, first_seen, last_seen, status)
-          VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'active')
+          (id, job_id, mac_address, ip_address, vendor, host_ip, interface_name, whitelisted, first_seen, last_seen, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'active')
         `);
-        insertDeviceStmt.run(uuidv4(), jobId, device.mac, device.ip, device.vendor, isWhitelisted ? 1 : 0);
+        insertDeviceStmt.run(
+          uuidv4(), 
+          jobId, 
+          device.mac, 
+          device.ip || null, 
+          device.vendor || null,
+          device.host_ip || null,
+          device.interface_name || null,
+          isWhitelisted ? 1 : 0
+        );
 
         // Generate notification
         if (job.notifications_enabled) {
@@ -151,7 +187,9 @@ export class JobRunner {
               type: 'information',
               message: `New authorized device discovered: ${device.mac}`,
               mac_address: device.mac,
-              ip_address: device.ip
+              ip_address: device.ip || null,
+              host_ip: device.host_ip || null,
+              interface_name: device.interface_name || null
             });
           } else if (!isWhitelisted && job.notify_unauthorized_macs) {
             warnings++;
@@ -159,53 +197,91 @@ export class JobRunner {
               job_id: jobId,
               job_name: job.name,
               type: 'warning',
-              message: `Unauthorized device detected: ${device.mac}`,
+              message: `Unauthorized device detected: ${device.mac}${device.host_ip ? ` on ${device.host_ip}` : ''}`,
               mac_address: device.mac,
-              ip_address: device.ip
+              ip_address: device.ip || null,
+              host_ip: device.host_ip || null,
+              interface_name: device.interface_name || null
             });
           }
         }
       } else {
-        // Existing device - check for IP changes
-        if (existingDevice.ip_address !== device.ip && job.notifications_enabled && job.notify_ip_changes) {
+        // Existing device - check for changes
+        let hasChanges = false;
+        
+        // For ARP scan jobs, check IP changes
+        if (job.type === 'arp-scan' && existingDevice.ip_address !== device.ip && job.notifications_enabled && job.notify_ip_changes) {
+          hasChanges = true;
           await this.notificationService.createNotification({
             job_id: jobId,
             job_name: job.name,
             type: 'information',
             message: `Device ${device.mac} changed IP from ${existingDevice.ip_address} to ${device.ip}`,
             mac_address: device.mac,
-            ip_address: device.ip
+            ip_address: device.ip,
+            host_ip: device.host_ip || null,
+            interface_name: device.interface_name || null
           });
         }
 
-        // Update last seen and IP
+        // For SSH jobs, check interface changes
+        if (job.type === 'ssh-mac-table' && existingDevice.interface_name !== device.interface_name && job.notifications_enabled) {
+          hasChanges = true;
+          await this.notificationService.createNotification({
+            job_id: jobId,
+            job_name: job.name,
+            type: 'information',
+            message: `Device ${device.mac} moved from ${existingDevice.interface_name} to ${device.interface_name} on ${device.host_ip}`,
+            mac_address: device.mac,
+            ip_address: device.ip || null,
+            host_ip: device.host_ip,
+            interface_name: device.interface_name
+          });
+        }
+
+        // Update last seen and other fields
         const updateDeviceStmt = db.prepare(`
           UPDATE known_devices 
-          SET ip_address = ?, vendor = ?, last_seen = CURRENT_TIMESTAMP, status = 'active'
-          WHERE job_id = ? AND mac_address = ?
+          SET ip_address = ?, vendor = ?, interface_name = ?, last_seen = CURRENT_TIMESTAMP, status = 'active'
+          WHERE job_id = ? AND mac_address = ? AND (host_ip = ? OR host_ip IS NULL)
         `);
-        updateDeviceStmt.run(device.ip, device.vendor, jobId, device.mac);
+        updateDeviceStmt.run(
+          device.ip || existingDevice.ip_address, 
+          device.vendor || existingDevice.vendor, 
+          device.interface_name || existingDevice.interface_name,
+          jobId, 
+          device.mac,
+          device.host_ip || null
+        );
 
         // Remove from knownDevices map to track which devices were not seen
-        knownDevices.delete(device.mac);
+        knownDevices.delete(deviceKey);
       }
 
       // Add to device history
       const insertHistoryStmt = db.prepare(`
-        INSERT INTO device_history (id, job_id, mac_address, ip_address, vendor, detected_at)
-        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO device_history (id, job_id, mac_address, ip_address, vendor, host_ip, interface_name, detected_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       `);
-      insertHistoryStmt.run(uuidv4(), jobId, device.mac, device.ip, device.vendor);
+      insertHistoryStmt.run(
+        uuidv4(), 
+        jobId, 
+        device.mac, 
+        device.ip || null, 
+        device.vendor || null,
+        device.host_ip || null,
+        device.interface_name || null
+      );
     }
 
     // Mark devices that were not seen as inactive
-    for (const [mac, device] of knownDevices) {
+    for (const [deviceKey, device] of knownDevices) {
       const updateInactiveStmt = db.prepare(`
         UPDATE known_devices 
         SET status = 'inactive' 
-        WHERE job_id = ? AND mac_address = ?
+        WHERE id = ?
       `);
-      updateInactiveStmt.run(jobId, mac);
+      updateInactiveStmt.run(device.id);
     }
 
     // Apply retention policy
